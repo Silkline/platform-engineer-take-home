@@ -1,0 +1,10 @@
+node_modules/
+bin/
+*.log
+.DS_Store
+.pulumi/
+Pulumi.*.yaml
+!Pulumi.yaml
+
+# Interviewer-only — never publish
+INTERVIEWER.md

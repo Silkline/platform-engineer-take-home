@@ -1,0 +1,3 @@
+name: acme-platform
+runtime: nodejs
+description: Acme Platform — production infrastructure

@@ -1,0 +1,13 @@
+{
+  "name": "acme-platform",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "devDependencies": {
+    "@types/node": "^20"
+  },
+  "dependencies": {
+    "@pulumi/aws": "^6.0.0",
+    "@pulumi/pulumi": "^3.0.0"
+  }
+}
