@@ -5,6 +5,4 @@ bin/
 .pulumi/
 Pulumi.*.yaml
 !Pulumi.yaml
-
-# Interviewer-only — never publish
-INTERVIEWER.md
+!Pulumi.dev.template.yaml

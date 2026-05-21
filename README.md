@@ -43,4 +43,18 @@ That's it. The whole stack is one file on purpose — pretend a more senior engi
 - If you propose moving anything to a new file, package, or Pulumi component, **do it** — don't just describe it. We want to see your hands on the code.
 - If you find yourself wanting more context about Acme (the company, the customers, the traffic), make reasonable assumptions and state them in the PR description.
 
+## (Optional) Run `pulumi preview` locally
+
+You don't need Pulumi to do this exercise — it's a code-review and design task. If you'd like to render the resource graph anyway, the repo ships with a template stack config that lets `pulumi preview` run with no AWS account:
+
+```sh
+npm install
+pulumi login --local                          # local backend, no Pulumi Cloud account needed
+cp Pulumi.dev.template.yaml Pulumi.dev.yaml
+pulumi stack init dev
+pulumi preview
+```
+
+The template sets `aws:skipCredentialsValidation`, `aws:skipRequestingAccountId`, and `aws:skipMetadataApiCheck` (plus dummy access/secret keys) so the AWS provider initializes offline. No real AWS calls are made.
+
 Good luck.
