@@ -1,0 +1,18 @@
+# Stack config template for running `pulumi preview` locally without AWS credentials.
+#
+# Usage:
+#   pulumi login --local
+#   cp Pulumi.dev.template.yaml Pulumi.dev.yaml
+#   pulumi stack init dev
+#   pulumi preview
+#
+# The skip-* flags tell the AWS provider not to validate credentials via STS,
+# not to fetch the account ID, and not to probe the EC2 metadata service —
+# so preview renders the planned resource graph fully offline.
+config:
+  aws:region: us-east-1
+  aws:accessKey: dummy
+  aws:secretKey: dummy
+  aws:skipCredentialsValidation: "true"
+  aws:skipRequestingAccountId: "true"
+  aws:skipMetadataApiCheck: "true"
