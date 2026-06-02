@@ -9,7 +9,11 @@ import { Networking } from "./src/networking";
 const config = new pulumi.Config();
 const awsConfig = new pulumi.Config("aws");
 const region = awsConfig.require("region");
-const dbPassword = "acme-prod-2024!"; // last reference removed in PR 6 (worker)
+
+// Lets `pulumi preview` render offline (dummy AWS credentials cannot
+// resolve aws.ec2.getAmi). Real deployments omit this and let the
+// lookup find the latest AL2023.
+const workerAmiOverride = config.get("workerAmi");
 
 // ---------- Networking ----------
 // Aliases on the VPC, the public subnet, the IGW, the public route table,
@@ -308,22 +312,88 @@ const gatewayService = new aws.ecs.Service("acme-gateway-service", {
 });
 
 // ---------- Background jobs worker ----------
-// (workerSg is declared above so the RDS SG can reference it as an
-// ingress source. SSH/HTTP ingress was removed in PR 1; operator access
-// via SSM lands in PR 6.)
+// workerSg is declared above (the database section needed it as an
+// ingress source). Operator access uses SSM Session Manager — no SSH
+// ingress, no public IP.
+
+const workerRole = new aws.iam.Role("acme-worker-role", {
+  assumeRolePolicy: JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "ec2.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  }),
+});
+
+new aws.iam.RolePolicyAttachment("acme-worker-ssm", {
+  role: workerRole.name,
+  policyArn: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+});
+
+new aws.iam.RolePolicy("acme-worker-secrets", {
+  role: workerRole.name,
+  policy: pulumi.jsonStringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: "secretsmanager:GetSecretValue",
+        Resource: [dbConnectionString.arn, workerTokenSecret.arn],
+      },
+    ],
+  }),
+});
+
+const workerProfile = new aws.iam.InstanceProfile("acme-worker-profile", {
+  role: workerRole.name,
+});
+
+const workerAmi: pulumi.Input<string> = workerAmiOverride
+  ? workerAmiOverride
+  : aws.ec2.getAmiOutput({
+      mostRecent: true,
+      owners: ["amazon"],
+      filters: [
+        { name: "name", values: ["al2023-ami-*-x86_64"] },
+        { name: "state", values: ["available"] },
+      ],
+    }).id;
+
+const workerUserData = pulumi.interpolate`#!/bin/bash
+set -euo pipefail
+
+dnf install -y docker awscli
+systemctl enable --now docker
+
+DB_URL=$(aws secretsmanager get-secret-value --region ${region} --secret-id ${dbConnectionString.arn} --query SecretString --output text)
+WORKER_TOKEN=$(aws secretsmanager get-secret-value --region ${region} --secret-id ${workerTokenSecret.arn} --query SecretString --output text)
+
+docker run -d \\
+  --restart unless-stopped \\
+  -e DATABASE_URL="$DB_URL" \\
+  -e WORKER_TOKEN="$WORKER_TOKEN" \\
+  acmehq/jobs-worker:latest
+`;
 
 const worker = new aws.ec2.Instance("acme-worker", {
-  ami: "ami-0c55b159cbfafe1f0",
+  ami: workerAmi,
   instanceType: "t3.medium",
-  subnetId: net.publicSubnetIds[0],
+  subnetId: net.privateSubnetIds[0],
   vpcSecurityGroupIds: [workerSg.id],
-  associatePublicIpAddress: true,
-  userData: pulumi.interpolate`#!/bin/bash
-docker run -d \\
-  -e DATABASE_URL="postgres://acme_admin:${dbPassword}@${db.address}:5432/postgres" \\
-  -e WORKER_TOKEN="trg_live_abc123def456" \\
-  acmehq/jobs-worker:latest
-`,
+  associatePublicIpAddress: false,
+  iamInstanceProfile: workerProfile.name,
+  metadataOptions: {
+    httpTokens: "required",
+    httpEndpoint: "enabled",
+    httpPutResponseHopLimit: 1,
+  },
+  rootBlockDevice: { encrypted: true },
+  userData: workerUserData,
+  tags: { Name: "acme-worker" },
 });
 
 export const dbEndpoint = db.endpoint;

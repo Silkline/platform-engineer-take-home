@@ -16,3 +16,7 @@ config:
   aws:skipCredentialsValidation: "true"
   aws:skipRequestingAccountId: "true"
   aws:skipMetadataApiCheck: "true"
+  # Offline preview can't resolve aws.ec2.getAmi with the dummy credentials,
+  # so we pin a placeholder AMI here. Real stacks omit this and let the
+  # AL2023 lookup pick the latest image.
+  acme-platform:workerAmi: ami-00000000000000000
