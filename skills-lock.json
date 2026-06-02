@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "pulumi-best-practices": {
+      "source": "pulumi/agent-skills",
+      "sourceType": "github",
+      "skillPath": "authoring/skills/pulumi-best-practices/SKILL.md",
+      "computedHash": "cbbaa9f2a7b3a52eb5ed0e0c60e50b4440ed884113dc919bb83c0a5723cd487f"
+    },
+    "pulumi-esc": {
+      "source": "pulumi/agent-skills",
+      "sourceType": "github",
+      "skillPath": "authoring/skills/pulumi-esc/SKILL.md",
+      "computedHash": "0476a30cbf9595b1011eb1a5ae4e7bae99c0a2a3bcb15eed1626f4deaaf38a3f"
+    }
+  }
+}
