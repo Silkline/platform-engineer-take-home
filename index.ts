@@ -1,12 +1,13 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import * as random from "@pulumi/random";
 
 import { Networking } from "./src/networking";
 
 // Acme Platform — production infrastructure
 
 const config = new pulumi.Config();
-const dbPassword = "acme-prod-2024!";
+const dbPassword = "acme-prod-2024!"; // replaced by dbPasswordValue.result in PR 5
 
 // ---------- Networking ----------
 // Aliases on the VPC, the public subnet, the IGW, the public route table,
@@ -36,6 +37,58 @@ const db = new aws.rds.Instance("acme-db", {
   enabledCloudwatchLogsExports: ["postgresql", "upgrade"],
   performanceInsightsEnabled: true,
   caCertIdentifier: "rds-ca-rsa2048-g1",
+});
+
+// ---------- Secret material ----------
+// Provisioned now; not yet consumed by RDS / Hasura / worker (those swaps
+// land in PR 5 and PR 6). dbConnectionString carries the *new* random
+// password — it's intentional that the value diverges from the live RDS
+// credential here, because PR 5 atomically updates RDS to dbPasswordValue
+// and switches Hasura to read this secret in the same `pulumi up`.
+
+const dbPasswordValue = new random.RandomPassword("acme-db-password", {
+  length: 32,
+  special: false, // URL-safe: it ends up in postgres:// URLs
+});
+
+const hasuraAdminPasswordValue = new random.RandomPassword(
+  "acme-hasura-admin-password",
+  { length: 32, special: false },
+);
+
+const workerTokenValue = new random.RandomPassword("acme-worker-token-value", {
+  length: 32,
+  special: false,
+});
+
+const hasuraAdminSecret = new aws.secretsmanager.Secret("acme-hasura-admin", {
+  description: "Hasura admin secret",
+  recoveryWindowInDays: 7,
+});
+new aws.secretsmanager.SecretVersion("acme-hasura-admin-v1", {
+  secretId: hasuraAdminSecret.id,
+  secretString: hasuraAdminPasswordValue.result,
+});
+
+const workerTokenSecret = new aws.secretsmanager.Secret("acme-worker-token", {
+  description: "Background worker auth token",
+  recoveryWindowInDays: 7,
+});
+new aws.secretsmanager.SecretVersion("acme-worker-token-v1", {
+  secretId: workerTokenSecret.id,
+  secretString: workerTokenValue.result,
+});
+
+const dbConnectionString = new aws.secretsmanager.Secret(
+  "acme-db-connection-string",
+  {
+    description: "Composed postgres:// URL for Hasura + worker",
+    recoveryWindowInDays: 7,
+  },
+);
+new aws.secretsmanager.SecretVersion("acme-db-connection-string-v1", {
+  secretId: dbConnectionString.id,
+  secretString: pulumi.interpolate`postgres://acme_admin:${dbPasswordValue.result}@${db.address}:5432/postgres`,
 });
 
 // ---------- Attachments bucket ----------
@@ -109,6 +162,22 @@ new aws.iam.RolePolicyAttachment("acme-gateway-exec-managed", {
   role: executionRole.name,
   policyArn:
     "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+});
+
+// Scoped Secrets Manager access for the ECS agent to resolve the new
+// `secrets:` block (wired up in PR 5).
+new aws.iam.RolePolicy("acme-gateway-exec-secrets", {
+  role: executionRole.name,
+  policy: pulumi.jsonStringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: "secretsmanager:GetSecretValue",
+        Resource: [dbConnectionString.arn, hasuraAdminSecret.arn],
+      },
+    ],
+  }),
 });
 
 const taskRole = new aws.iam.Role("acme-gateway-task", {
