@@ -7,7 +7,9 @@ import { Networking } from "./src/networking";
 // Acme Platform — production infrastructure
 
 const config = new pulumi.Config();
-const dbPassword = "acme-prod-2024!"; // replaced by dbPasswordValue.result in PR 5
+const awsConfig = new pulumi.Config("aws");
+const region = awsConfig.require("region");
+const dbPassword = "acme-prod-2024!"; // last reference removed in PR 6 (worker)
 
 // ---------- Networking ----------
 // Aliases on the VPC, the public subnet, the IGW, the public route table,
@@ -29,59 +31,11 @@ const workerSg = new aws.ec2.SecurityGroup("acme-worker-sg", {
   ],
 });
 
-// ---------- Database (Postgres) ----------
-
-const dbSubnetGroup = new aws.rds.SubnetGroup("acme-db-subnets", {
-  subnetIds: net.privateSubnetIds,
-  description: "Private subnets for acme-db",
-});
-
-// Locked-down SG: no inline ingress, rules added as separate resources so
-// rdsSg and the consumer SGs don't form a circular dependency.
-const rdsSg = new aws.ec2.SecurityGroup("acme-rds-sg", {
-  vpcId: net.vpcId,
-  description: "Postgres — ingress 5432 from worker (and ECS task once PR 5 wires it)",
-});
-
-new aws.ec2.SecurityGroupRule("acme-rds-ingress-from-worker", {
-  type: "ingress",
-  securityGroupId: rdsSg.id,
-  protocol: "tcp",
-  fromPort: 5432,
-  toPort: 5432,
-  sourceSecurityGroupId: workerSg.id,
-  description: "Worker to Postgres",
-});
-
-const db = new aws.rds.Instance("acme-db", {
-  engine: "postgres",
-  engineVersion: "15.4",
-  instanceClass: "db.t3.medium",
-  allocatedStorage: 100,
-  username: "acme_admin",
-  password: dbPassword,
-  // Network hardening — all in-place:
-  publiclyAccessible: false,
-  dbSubnetGroupName: dbSubnetGroup.name,
-  vpcSecurityGroupIds: [rdsSg.id],
-  multiAz: true,
-  // From PR 1 (still here):
-  iamDatabaseAuthenticationEnabled: true,
-  deletionProtection: true,
-  skipFinalSnapshot: false,
-  finalSnapshotIdentifier: "acme-db-final",
-  backupRetentionPeriod: 14,
-  enabledCloudwatchLogsExports: ["postgresql", "upgrade"],
-  performanceInsightsEnabled: true,
-  caCertIdentifier: "rds-ca-rsa2048-g1",
-});
-
-// ---------- Secret material ----------
-// Provisioned now; not yet consumed by RDS / Hasura / worker (those swaps
-// land in PR 5 and PR 6). dbConnectionString carries the *new* random
-// password — it's intentional that the value diverges from the live RDS
-// credential here, because PR 5 atomically updates RDS to dbPasswordValue
-// and switches Hasura to read this secret in the same `pulumi up`.
+// ---------- Secret material (random passwords + non-DB-dependent secrets) ----------
+// dbConnectionString is composed below, after the RDS instance, since the
+// URL value embeds db.address. The DB master password and the Hasura/worker
+// secrets are independent of the RDS resource and live here so the RDS
+// `password` field can consume dbPasswordValue.
 
 const dbPasswordValue = new random.RandomPassword("acme-db-password", {
   length: 32,
@@ -115,6 +69,55 @@ new aws.secretsmanager.SecretVersion("acme-worker-token-v1", {
   secretId: workerTokenSecret.id,
   secretString: workerTokenValue.result,
 });
+
+// ---------- Database (Postgres) ----------
+
+const dbSubnetGroup = new aws.rds.SubnetGroup("acme-db-subnets", {
+  subnetIds: net.privateSubnetIds,
+  description: "Private subnets for acme-db",
+});
+
+// Locked-down SG: no inline ingress, rules added as separate resources so
+// rdsSg and the consumer SGs don't form a circular dependency.
+const rdsSg = new aws.ec2.SecurityGroup("acme-rds-sg", {
+  vpcId: net.vpcId,
+  description: "Postgres — ingress 5432 from worker (and ECS task once PR 5 wires it)",
+});
+
+new aws.ec2.SecurityGroupRule("acme-rds-ingress-from-worker", {
+  type: "ingress",
+  securityGroupId: rdsSg.id,
+  protocol: "tcp",
+  fromPort: 5432,
+  toPort: 5432,
+  sourceSecurityGroupId: workerSg.id,
+  description: "Worker to Postgres",
+});
+
+const db = new aws.rds.Instance("acme-db", {
+  engine: "postgres",
+  engineVersion: "15.4",
+  instanceClass: "db.t3.medium",
+  allocatedStorage: 100,
+  username: "acme_admin",
+  password: dbPasswordValue.result,
+  // Network hardening — all in-place:
+  publiclyAccessible: false,
+  dbSubnetGroupName: dbSubnetGroup.name,
+  vpcSecurityGroupIds: [rdsSg.id],
+  multiAz: true,
+  // From PR 1 (still here):
+  iamDatabaseAuthenticationEnabled: true,
+  deletionProtection: true,
+  skipFinalSnapshot: false,
+  finalSnapshotIdentifier: "acme-db-final",
+  backupRetentionPeriod: 14,
+  enabledCloudwatchLogsExports: ["postgresql", "upgrade"],
+  performanceInsightsEnabled: true,
+  caCertIdentifier: "rds-ca-rsa2048-g1",
+});
+
+// ---------- Composed DB connection string (depends on db.address) ----------
 
 const dbConnectionString = new aws.secretsmanager.Secret(
   "acme-db-connection-string",
@@ -174,7 +177,36 @@ new aws.s3.BucketLifecycleConfigurationV2("acme-attachments-lifecycle", {
 
 // ---------- GraphQL gateway (Hasura on Fargate) ----------
 
+const ecsTaskSg = new aws.ec2.SecurityGroup("acme-gateway-sg", {
+  vpcId: net.vpcId,
+  description: "Hasura task — ingress 8080 from world until ALB stack lands",
+  egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] }],
+  ingress: [
+    {
+      protocol: "tcp",
+      fromPort: 8080,
+      toPort: 8080,
+      cidrBlocks: ["0.0.0.0/0"],
+      description: "Hasura GraphQL (public until ALB lands)",
+    },
+  ],
+});
+
+new aws.ec2.SecurityGroupRule("acme-rds-ingress-from-gateway", {
+  type: "ingress",
+  securityGroupId: rdsSg.id,
+  protocol: "tcp",
+  fromPort: 5432,
+  toPort: 5432,
+  sourceSecurityGroupId: ecsTaskSg.id,
+  description: "Hasura to Postgres",
+});
+
 const cluster = new aws.ecs.Cluster("acme-cluster", {});
+
+const gatewayLogGroup = new aws.cloudwatch.LogGroup("acme-gateway-logs", {
+  retentionInDays: 30,
+});
 
 const ecsAssumeRolePolicy = JSON.stringify({
   Version: "2012-10-17",
@@ -229,16 +261,34 @@ const gatewayTask = new aws.ecs.TaskDefinition("acme-gateway", {
   requiresCompatibilities: ["FARGATE"],
   taskRoleArn: taskRole.arn,
   executionRoleArn: executionRole.arn,
-  containerDefinitions: pulumi.interpolate`[{
-    "name": "gateway",
-    "image": "hasura/graphql-engine:v2.36.0",
-    "portMappings": [{"containerPort": 8080}],
-    "environment": [
-      {"name": "HASURA_GRAPHQL_DATABASE_URL", "value": "postgres://acme_admin:${dbPassword}@${db.address}:5432/postgres"},
-      {"name": "HASURA_GRAPHQL_ADMIN_SECRET", "value": "supersecret123"},
-      {"name": "HASURA_GRAPHQL_ENABLE_CONSOLE", "value": "false"}
-    ]
-  }]`,
+  containerDefinitions: pulumi.jsonStringify([
+    {
+      name: "gateway",
+      image: "hasura/graphql-engine:v2.36.0",
+      portMappings: [{ containerPort: 8080 }],
+      environment: [
+        { name: "HASURA_GRAPHQL_ENABLE_CONSOLE", value: "false" },
+      ],
+      secrets: [
+        {
+          name: "HASURA_GRAPHQL_DATABASE_URL",
+          valueFrom: dbConnectionString.arn,
+        },
+        {
+          name: "HASURA_GRAPHQL_ADMIN_SECRET",
+          valueFrom: hasuraAdminSecret.arn,
+        },
+      ],
+      logConfiguration: {
+        logDriver: "awslogs",
+        options: {
+          "awslogs-group": gatewayLogGroup.name,
+          "awslogs-region": region,
+          "awslogs-stream-prefix": "gateway",
+        },
+      },
+    },
+  ]),
 });
 
 const gatewayService = new aws.ecs.Service("acme-gateway-service", {
@@ -247,9 +297,14 @@ const gatewayService = new aws.ecs.Service("acme-gateway-service", {
   desiredCount: 1,
   launchType: "FARGATE",
   networkConfiguration: {
+    // Public subnet + public IP retained until the ALB follow-up stack
+    // moves the task private and fronts it with a load balancer.
     subnets: [net.publicSubnetIds[0]],
+    securityGroups: [ecsTaskSg.id],
     assignPublicIp: true,
   },
+  deploymentMinimumHealthyPercent: 50,
+  deploymentMaximumPercent: 200,
 });
 
 // ---------- Background jobs worker ----------
