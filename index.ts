@@ -1,36 +1,20 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 
+import { Networking } from "./src/networking";
+
 // Acme Platform — production infrastructure
 
 const config = new pulumi.Config();
 const dbPassword = "acme-prod-2024!";
 
 // ---------- Networking ----------
+// Aliases on the VPC, the public subnet, the IGW, the public route table,
+// and the public RTA preserve the original resources when applied to a
+// stateful stack. New private subnets and a NAT come up additively — no
+// workload moves into them in this PR.
 
-const vpc = new aws.ec2.Vpc("acme-vpc", {
-  cidrBlock: "10.0.0.0/16",
-  enableDnsHostnames: true,
-});
-
-const publicSubnet = new aws.ec2.Subnet("acme-public", {
-  vpcId: vpc.id,
-  cidrBlock: "10.0.1.0/24",
-  availabilityZone: "us-east-1a",
-  mapPublicIpOnLaunch: true,
-});
-
-const igw = new aws.ec2.InternetGateway("acme-igw", { vpcId: vpc.id });
-
-const publicRt = new aws.ec2.RouteTable("acme-public-rt", {
-  vpcId: vpc.id,
-  routes: [{ cidrBlock: "0.0.0.0/0", gatewayId: igw.id }],
-});
-
-new aws.ec2.RouteTableAssociation("acme-public-rta", {
-  subnetId: publicSubnet.id,
-  routeTableId: publicRt.id,
-});
+const net = new Networking("acme-net");
 
 // ---------- Database (Postgres) ----------
 
@@ -157,7 +141,7 @@ const gatewayService = new aws.ecs.Service("acme-gateway-service", {
   desiredCount: 1,
   launchType: "FARGATE",
   networkConfiguration: {
-    subnets: [publicSubnet.id],
+    subnets: [net.publicSubnetIds[0]],
     assignPublicIp: true,
   },
 });
@@ -168,7 +152,7 @@ const gatewayService = new aws.ecs.Service("acme-gateway-service", {
 // Egress remains open so the worker can pull its container image; operator
 // access via SSM lands in PR 6.
 const workerSg = new aws.ec2.SecurityGroup("acme-worker-sg", {
-  vpcId: vpc.id,
+  vpcId: net.vpcId,
   egress: [
     { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
   ],
@@ -177,7 +161,7 @@ const workerSg = new aws.ec2.SecurityGroup("acme-worker-sg", {
 const worker = new aws.ec2.Instance("acme-worker", {
   ami: "ami-0c55b159cbfafe1f0",
   instanceType: "t3.medium",
-  subnetId: publicSubnet.id,
+  subnetId: net.publicSubnetIds[0],
   vpcSecurityGroupIds: [workerSg.id],
   associatePublicIpAddress: true,
   userData: pulumi.interpolate`#!/bin/bash
