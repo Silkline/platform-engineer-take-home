@@ -17,7 +17,41 @@ const dbPassword = "acme-prod-2024!"; // replaced by dbPasswordValue.result in P
 
 const net = new Networking("acme-net");
 
+// ---------- Background-worker security group ----------
+// Defined here (ahead of the database) so the RDS SG can reference it as
+// an ingress source without a circular declaration. The EC2 worker that
+// uses this SG is defined further down.
+
+const workerSg = new aws.ec2.SecurityGroup("acme-worker-sg", {
+  vpcId: net.vpcId,
+  egress: [
+    { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
+  ],
+});
+
 // ---------- Database (Postgres) ----------
+
+const dbSubnetGroup = new aws.rds.SubnetGroup("acme-db-subnets", {
+  subnetIds: net.privateSubnetIds,
+  description: "Private subnets for acme-db",
+});
+
+// Locked-down SG: no inline ingress, rules added as separate resources so
+// rdsSg and the consumer SGs don't form a circular dependency.
+const rdsSg = new aws.ec2.SecurityGroup("acme-rds-sg", {
+  vpcId: net.vpcId,
+  description: "Postgres — ingress 5432 from worker (and ECS task once PR 5 wires it)",
+});
+
+new aws.ec2.SecurityGroupRule("acme-rds-ingress-from-worker", {
+  type: "ingress",
+  securityGroupId: rdsSg.id,
+  protocol: "tcp",
+  fromPort: 5432,
+  toPort: 5432,
+  sourceSecurityGroupId: workerSg.id,
+  description: "Worker to Postgres",
+});
 
 const db = new aws.rds.Instance("acme-db", {
   engine: "postgres",
@@ -26,9 +60,12 @@ const db = new aws.rds.Instance("acme-db", {
   allocatedStorage: 100,
   username: "acme_admin",
   password: dbPassword,
-  publiclyAccessible: true,
-  // In-place hardening that does not require subnet/SG changes (those land
-  // in PR 4) or replacement (storageEncrypted is deferred):
+  // Network hardening — all in-place:
+  publiclyAccessible: false,
+  dbSubnetGroupName: dbSubnetGroup.name,
+  vpcSecurityGroupIds: [rdsSg.id],
+  multiAz: true,
+  // From PR 1 (still here):
   iamDatabaseAuthenticationEnabled: true,
   deletionProtection: true,
   skipFinalSnapshot: false,
@@ -216,16 +253,9 @@ const gatewayService = new aws.ecs.Service("acme-gateway-service", {
 });
 
 // ---------- Background jobs worker ----------
-
-// Worker SG: SSH (22) and HTTP (80) ingress from the world are deleted.
-// Egress remains open so the worker can pull its container image; operator
-// access via SSM lands in PR 6.
-const workerSg = new aws.ec2.SecurityGroup("acme-worker-sg", {
-  vpcId: net.vpcId,
-  egress: [
-    { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
-  ],
-});
+// (workerSg is declared above so the RDS SG can reference it as an
+// ingress source. SSH/HTTP ingress was removed in PR 1; operator access
+// via SSM lands in PR 6.)
 
 const worker = new aws.ec2.Instance("acme-worker", {
   ami: "ami-0c55b159cbfafe1f0",
