@@ -22,10 +22,15 @@ Three things to keep in mind:
 
 ## How to submit
 
-1. Fork this repo to your personal GitHub account.
-2. Make your changes on a branch in your fork.
-3. Open a PR from your branch to your fork's `main`.
-4. Reply to the email thread with the PR URL.
+1. Click **Use this template → Create a new repository** and make it **Private**.
+2. Add the reviewers as collaborators (Settings → Collaborators): `<reviewer-handles>`.
+3. Make your changes on a branch in your new repo.
+4. Open a PR from your branch to your repo's `main`.
+5. Reply to the email thread with the PR URL.
+
+> Please use **Use this template** rather than forking. A template copy is your own standalone
+> repo, so your PR stays in your private copy — there's no "open a PR against the upstream repo"
+> path to trip over.
 
 You **do not** need to run `pulumi up` or have an AWS account. Treat this as a code-review and design exercise. `pulumi preview` is not required either.
 
